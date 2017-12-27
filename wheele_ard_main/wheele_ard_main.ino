@@ -1,12 +1,15 @@
 /****************************************************************************
-CAN Write Demo for the SparkFun CAN Bus Shield. 
-
-Written by Stephen McCoy. 
+Based on tutorial by Stephen McCoy. 
 Original tutorial available here: http://www.instructables.com/id/CAN-Bus-Sniffing-and-Broadcasting-with-Arduino
 Used with permission 2016. License CC By SA. 
 
 Distributed as-is; no warranty is given.
 *************************************************************************/
+
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+
 #define CANSPEED_125 	7		// CAN speed at 125 kbps
 #define CANSPEED_250  	3		// CAN speed at 250 kbps
 #define CANSPEED_500	1		// CAN speed at 500 kbps
@@ -21,9 +24,12 @@ Distributed as-is; no warranty is given.
 #define ENC_CAN_ID 0x105
 #define BUMP_CAN_ID 0x121
 #define TEST_CAN_ID 0x321
+#define GYRO_CAN_ID 0x131
+#define BATT_CAN_ID 0x140
 
-//**************Bumper*********
+//**************Bumper, Battery*********
 #define BUMP_PIN 8
+#define BATT_PIN A2
 //**************RC signals IN*********
 #define SPEED_PIN 6
 #define STEER_PIN 7
@@ -35,13 +41,16 @@ Distributed as-is; no warranty is given.
 #define LEFT_ENC_B 15 //A1
 //********************************Setup Loop*********************************//
 
-long timeRC, timeCANPulse;
+long timeRC, timeGyro, timeBatt;
 long prev_enc_left, prev_enc_right;
 int prev_steer, prev_speed;
+int dtheta = 0;
 
 int16_t enc_left = 0, enc_right = 0;
 
 tCAN msg;
+
+Adafruit_BNO055 bno = Adafruit_BNO055();
 
 void setup() {
   Serial.begin(9600);
@@ -62,16 +71,50 @@ void setup() {
   pinMode(RIGHT_ENC_B, INPUT);
   attachInterrupt(1,right_enc_tick, CHANGE);
   attachPinChangeInterrupt(LEFT_ENC_A,left_enc_tick,CHANGE);
+  
+  if(!bno.begin())
+  {
+    /* There was a problem detecting the BNO055 ... check your connections */
+    Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+    while(1);
+  }
     
   delay(200);
+  bno.setExtCrystalUse(true);
   timeRC = millis();
+  timeGyro = millis();
+  timeBatt = millis();
 }
 
 //********************************Main Loop*********************************//
 
 void loop() 
 {
-
+  if(millis() - timeBatt > 5000)
+  {
+    int16_t raw_battery_signal = analogRead(BATT_PIN);
+    tx_can(BATT_CAN_ID, raw_battery_signal, 0);
+    Serial.print("Raw Battery: ");
+    Serial.println(raw_battery_signal);
+    timeBatt = millis();
+  }
+  
+  if(millis() - timeGyro > 50)
+  {
+    imu::Vector<3> gyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+    /*Serial.print("X: ");
+    Serial.print(gyro.x());
+    Serial.print(" Y: ");
+    Serial.print(gyro.y());
+    Serial.print(" Z: ");
+    Serial.println(gyro.z());*/
+    int16_t gyroZcentiDeg = int(gyro.z()*180.0/3.1416*100);
+    //Serial.println(gyroZcentiDeg);
+    tx_can(GYRO_CAN_ID, gyroZcentiDeg, 0);
+    tx_can(ENC_CAN_ID, enc_left, enc_right);
+    timeGyro = millis();
+  }
+  
   int16_t steer_pwm = pulseIn(STEER_PIN, HIGH, 15000);
   int16_t speed_pwm = pulseIn(SPEED_PIN, HIGH, 15000);
   int16_t bumper = digitalRead(BUMP_PIN);
@@ -79,9 +122,8 @@ void loop()
   if(millis() - timeRC > 100)
   {
     tx_can(RC_CMD_CAN_ID, speed_pwm, steer_pwm);
-    tx_can(ENC_CAN_ID, enc_left, enc_right);
     tx_can(BUMP_CAN_ID, bumper, 0);
-    tx_can(TEST_CAN_ID, 1350, 1500);
+    //tx_can(TEST_CAN_ID, 1350, 1500);
     timeRC = millis();
   }
   
@@ -105,8 +147,8 @@ void loop()
 
 uint8_t tx_can(uint16_t id, int16_t num1, int16_t num2)
 {
-  uint16_t raw1 = num1 + 32767;
-  uint16_t raw2 = num2 + 32767;
+  uint16_t raw1 = num1 + 32768;
+  uint16_t raw2 = num2 + 32768;
   
   tCAN message;
 
