@@ -25,6 +25,8 @@ Distributed as-is; no warranty is given.
 #define BUMP_CAN_ID 0x121
 #define TEST_CAN_ID 0x321
 #define GYRO_CAN_ID 0x131
+#define ACCEL_CAN_ID 0x132
+#define COMPASS_CAN_ID 0x133
 #define BATT_CAN_ID 0x140
 
 //**************Bumper, Battery*********
@@ -41,7 +43,7 @@ Distributed as-is; no warranty is given.
 #define LEFT_ENC_B 15 //A1
 //********************************Setup Loop*********************************//
 
-long timeRC, timeGyro, timeBatt;
+long timeRC, timeGyro, timeHeading, timeBatt;
 long prev_enc_left, prev_enc_right;
 int prev_steer, prev_speed;
 int dtheta = 0;
@@ -84,6 +86,7 @@ void setup() {
   timeRC = millis();
   timeGyro = millis();
   timeBatt = millis();
+  timeHeading = millis();
 }
 
 //********************************Main Loop*********************************//
@@ -93,9 +96,9 @@ void loop()
   if(millis() - timeBatt > 5000)
   {
     int16_t raw_battery_signal = analogRead(BATT_PIN);
-    tx_can(BATT_CAN_ID, raw_battery_signal, 0);
-    Serial.print("Raw Battery: ");
-    Serial.println(raw_battery_signal);
+    tx_can(BATT_CAN_ID, raw_battery_signal, 0, 0, 0);
+    //Serial.print("Raw Battery: ");
+    //Serial.println(raw_battery_signal);
     timeBatt = millis();
   }
   
@@ -110,20 +113,44 @@ void loop()
     Serial.println(gyro.z());*/
     int16_t gyroZcentiDeg = int(gyro.z()*180.0/3.1416*100);
     //Serial.println(gyroZcentiDeg);
-    tx_can(GYRO_CAN_ID, gyroZcentiDeg, 0);
-    tx_can(ENC_CAN_ID, enc_left, enc_right);
+    tx_can(GYRO_CAN_ID, gyroZcentiDeg, 0, 0, 0);
+    tx_can(ENC_CAN_ID, enc_left, enc_right, 0, 0);
     timeGyro = millis();
   }
   
+  if(millis() - timeHeading > 200)
+  {
+    sensors_event_t event; 
+    bno.getEvent(&event);
+    float heading = (float)event.orientation.x;
+    //float y = (float)event.orientation.y;
+    //float z = (float)event.orientation.z;
+    /*Serial.print("orientation x, y, z: ");
+    Serial.print(heading );
+    Serial.print(", ");
+    Serial.print(y );
+    Serial.print(", ");
+    Serial.println(z );*/
+    int16_t headingCentiDeg = int(-(heading-180.0)*100); //centi-deg +/-180 deg
+    
+    imu::Vector<3> magnet = bno.getVector(Adafruit_BNO055::VECTOR_MAGNETOMETER);
+    int16_t magx_uTx10 = int(magnet.x()*100); //uTx100
+    int16_t magy_uTx10 = int(magnet.y()*100); //uTx100
+    int16_t magz_uTx10 = int(magnet.z()*100); //uTx100
+    
+    tx_can(COMPASS_CAN_ID, headingCentiDeg, magx_uTx10, magy_uTx10, magz_uTx10);
+  }
+  
+  // !!MOVE THESE pulseIn INSIDE THE RC IF STATEMENT BELOW!!
   int16_t steer_pwm = pulseIn(STEER_PIN, HIGH, 15000);
   int16_t speed_pwm = pulseIn(SPEED_PIN, HIGH, 15000);
   int16_t bumper = digitalRead(BUMP_PIN);
   //SEND RAW RC CMDS
   if(millis() - timeRC > 100)
   {
-    tx_can(RC_CMD_CAN_ID, speed_pwm, steer_pwm);
-    tx_can(BUMP_CAN_ID, bumper, 0);
-    //tx_can(TEST_CAN_ID, 1350, 1500);
+    tx_can(RC_CMD_CAN_ID, speed_pwm, steer_pwm, 0, 0);
+    tx_can(BUMP_CAN_ID, bumper, 0, 0, 0);
+    //tx_can(TEST_CAN_ID, 1350, 1500, 0, 0);
     timeRC = millis();
   }
   
@@ -145,10 +172,12 @@ void loop()
 
 }
 
-uint8_t tx_can(uint16_t id, int16_t num1, int16_t num2)
+uint8_t tx_can(uint16_t id, int16_t num1, int16_t num2, int16_t num3, int16_t num4)
 {
   uint16_t raw1 = num1 + 32768;
   uint16_t raw2 = num2 + 32768;
+  uint16_t raw3 = num3 + 32768;
+  uint16_t raw4 = num4 + 32768;
   
   tCAN message;
 
@@ -159,10 +188,10 @@ uint8_t tx_can(uint16_t id, int16_t num1, int16_t num2)
   message.data[1] = getByte(raw1,0);
   message.data[2] = getByte(raw2,1);
   message.data[3] = getByte(raw2,0);
-  message.data[4] = 0x00;
-  message.data[5] = 0x00;
-  message.data[6] = 0x00;
-  message.data[7] = 0x00;
+  message.data[4] = getByte(raw3,1);
+  message.data[5] = getByte(raw3,0);
+  message.data[6] = getByte(raw4,1);
+  message.data[7] = getByte(raw4,0);
   
   mcp2515_bit_modify(CANCTRL, (1<<REQOP2)|(1<<REQOP1)|(1<<REQOP0), 0);
   return mcp2515_send_message(&message);
