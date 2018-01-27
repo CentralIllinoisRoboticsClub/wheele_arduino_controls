@@ -212,7 +212,7 @@ boolean rx_can(tCAN *message)
 
 uint16_t convertCAN(tCAN message, unsigned int start_byte) //start byte is 0 to 7, left to right
 {
-  return (message.data[start_byte] << 8 ) + (message.data[start_byte+1]) - 32767;
+  return (message.data[start_byte] << 8 ) + (message.data[start_byte+1]) - 32768;
 }
 
 uint8_t getByte(uint16_t x, unsigned int n)
