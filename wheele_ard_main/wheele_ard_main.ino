@@ -131,7 +131,11 @@ void loop()
     Serial.print(y );
     Serial.print(", ");
     Serial.println(z );*/
-    int16_t headingCentiDeg = int(-(heading-180.0)*100); //centi-deg +/-180 deg
+    if(heading > 180.0)
+    {
+        heading -= 360.0;
+    }
+    int16_t headingCentiDeg = int(-heading*100.0); //centi-deg +/-180 deg
     
     imu::Vector<3> magnet = bno.getVector(Adafruit_BNO055::VECTOR_MAGNETOMETER);
     int16_t magx_uTx10 = int(magnet.x()*100); //uTx100
