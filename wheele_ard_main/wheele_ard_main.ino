@@ -49,6 +49,7 @@ int prev_steer, prev_speed;
 int dtheta = 0;
 
 int16_t enc_left = 0, enc_right = 0;
+int16_t steer_pwm = 1385, speed_pwm=1350;
 
 tCAN msg;
 
@@ -78,6 +79,7 @@ void setup() {
   {
     /* There was a problem detecting the BNO055 ... check your connections */
     Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+    // Send CAN ERROR MESSAGE, Software Reset, continue, do NOT use while(1)
     while(1);
   }
     
@@ -118,7 +120,7 @@ void loop()
     timeGyro = millis();
   }
   
-  if(millis() - timeHeading > 200)
+  if(millis() - timeHeading > 100)
   {
     sensors_event_t event; 
     bno.getEvent(&event);
@@ -143,15 +145,15 @@ void loop()
     int16_t magz_uTx10 = int(magnet.z()*100); //uTx100
     
     tx_can(COMPASS_CAN_ID, headingCentiDeg, magx_uTx10, magy_uTx10, magz_uTx10);
+    timeHeading = millis();
   }
   
-  // !!MOVE THESE pulseIn INSIDE THE RC IF STATEMENT BELOW!!
-  int16_t steer_pwm = pulseIn(STEER_PIN, HIGH, 15000);
-  int16_t speed_pwm = pulseIn(SPEED_PIN, HIGH, 15000);
-  int16_t bumper = digitalRead(BUMP_PIN);
   //SEND RAW RC CMDS
   if(millis() - timeRC > 100)
   {
+    steer_pwm = pulseIn(STEER_PIN, HIGH, 15000);
+    speed_pwm = pulseIn(SPEED_PIN, HIGH, 15000);
+    int16_t bumper = digitalRead(BUMP_PIN);
     tx_can(RC_CMD_CAN_ID, speed_pwm, steer_pwm, 0, 0);
     tx_can(BUMP_CAN_ID, bumper, 0, 0, 0);
     //tx_can(TEST_CAN_ID, 1350, 1500, 0, 0);
