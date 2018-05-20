@@ -33,6 +33,7 @@ Distributed as-is; no warranty is given.
 #define BUMP_PIN 8
 #define BATT_PIN A2
 //**************RC signals IN*********
+#define AUTO_PIN 5
 #define SPEED_PIN 6
 #define STEER_PIN 7
 //**************Encoders*************
@@ -49,7 +50,8 @@ int prev_steer, prev_speed;
 int dtheta = 0;
 
 int16_t enc_left = 0, enc_right = 0;
-int16_t steer_pwm = 1385, speed_pwm=1350;
+int16_t steer_pwm = 1385, speed_pwm=1350, auto_pwm = 1300;
+boolean readSpeed = true;
 
 tCAN msg;
 
@@ -151,10 +153,29 @@ void loop()
   //SEND RAW RC CMDS
   if(millis() - timeRC > 100)
   {
-    steer_pwm = pulseIn(STEER_PIN, HIGH, 15000);
-    speed_pwm = pulseIn(SPEED_PIN, HIGH, 15000);
+    auto_pwm = pulseIn(AUTO_PIN, HIGH, 15000);
+    if(auto_pwm < 1600)
+    {
+      if(readSpeed)
+      {
+        speed_pwm = pulseIn(SPEED_PIN, HIGH, 15000);
+      }
+      else
+      {
+        steer_pwm = pulseIn(STEER_PIN, HIGH, 15000);
+      }
+      readSpeed = !readSpeed;
+      //speed_pwm = pulseIn(SPEED_PIN, HIGH, 15000);
+      //steer_pwm = pulseIn(STEER_PIN, HIGH, 15000);
+      tx_can(RC_CMD_CAN_ID, speed_pwm, steer_pwm, auto_pwm, 0);
+      
+    }
+    else
+    {
+      tx_can(RC_CMD_CAN_ID, 1350, 1385, auto_pwm, 0);
+    }
     int16_t bumper = digitalRead(BUMP_PIN);
-    tx_can(RC_CMD_CAN_ID, speed_pwm, steer_pwm, 0, 0);
+    
     tx_can(BUMP_CAN_ID, bumper, 0, 0, 0);
     //tx_can(TEST_CAN_ID, 1350, 1500, 0, 0);
     timeRC = millis();
