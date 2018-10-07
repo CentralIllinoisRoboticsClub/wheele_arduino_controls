@@ -115,9 +115,11 @@ void loop()
     Serial.print(gyro.y());
     Serial.print(" Z: ");
     Serial.println(gyro.z());*/
+    int16_t gyroXcentiDeg = int(gyro.x()*180.0/3.1416*100);
+    int16_t gyroYcentiDeg = int(gyro.y()*180.0/3.1416*100);
     int16_t gyroZcentiDeg = int(gyro.z()*180.0/3.1416*100);
     //Serial.println(gyroZcentiDeg);
-    tx_can(GYRO_CAN_ID, gyroZcentiDeg, 0, 0, 0);
+    tx_can(GYRO_CAN_ID, gyroXcentiDeg, gyroYcentiDeg, gyroZcentiDeg, 0);
     tx_can(ENC_CAN_ID, enc_left, enc_right, 0, 0);
     timeGyro = millis();
   }
@@ -141,19 +143,19 @@ void loop()
     }
     int16_t headingCentiDeg = int(-heading*100.0); //centi-deg +/-180 deg
     
-    //imu::Vector<3> magnet = bno.getVector(Adafruit_BNO055::VECTOR_MAGNETOMETER);
-    //int16_t magx_uTx100 = int(magnet.x()*100); //uTx100
-    //int16_t magy_uTx100 = int(magnet.y()*100); //uTx100
-    //int16_t magz_uTx100 = int(magnet.z()*100); //uTx100
+    imu::Vector<3> magnet = bno.getVector(Adafruit_BNO055::VECTOR_MAGNETOMETER);
+    int16_t magx_uTx100 = int(magnet.x()*100); //uTx100
+    int16_t magy_uTx100 = int(magnet.y()*100); //uTx100
+    int16_t magz_uTx100 = int(magnet.z()*100); //uTx100
     
-    //tx_can(COMPASS_CAN_ID, headingCentiDeg, magx_uTx100, magy_uTx100, magz_uTx100);
+    tx_can(COMPASS_CAN_ID, magx_uTx100, magy_uTx100, magz_uTx100, headingCentiDeg); //Do NOT trust bno055 heading, auto-cal too dynamic
     
     imu::Vector<3> grav_accel = bno.getVector(Adafruit_BNO055::VECTOR_GRAVITY);
     int16_t temp_ax = int(grav_accel.x()*100);
     int16_t temp_ay = int(grav_accel.y()*100);
     int16_t temp_az = int(grav_accel.z()*100);
     
-    tx_can(COMPASS_CAN_ID, headingCentiDeg, temp_ax, temp_ay, temp_az);
+    tx_can(ACCEL_CAN_ID, temp_ax, temp_ay, temp_az, 0);
     timeHeading = millis();
   }
   
