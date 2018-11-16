@@ -177,6 +177,12 @@ void loop()
       //speed_pwm = pulseIn(SPEED_PIN, HIGH, 15000);
       //steer_pwm = pulseIn(STEER_PIN, HIGH, 15000);
       tx_can(RC_CMD_CAN_ID, speed_pwm, steer_pwm, auto_pwm, 0);
+      if(speed_pwm < 100)
+      {Serial.print("speed rc: "); Serial.println(speed_pwm);}
+      if(steer_pwm < 100)
+      {Serial.print("steer rc: "); Serial.println(steer_pwm);}
+      if(auto_pwm < 100)
+      {Serial.print("auto rc: "); Serial.println(auto_pwm);}
       
     }
     else
@@ -190,7 +196,7 @@ void loop()
     timeRC = millis();
   }
   
-  if(rx_can(&msg))
+  /*if(rx_can(&msg))
   {
     if(msg.id == 0x202)
     {
@@ -204,7 +210,7 @@ void loop()
       Serial.print(speed_pwm); Serial.print(", ");
       Serial.println(steer_pwm);
     }
-  }
+  }*/
 
 }
 
