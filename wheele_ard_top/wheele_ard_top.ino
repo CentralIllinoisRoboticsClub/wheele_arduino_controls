@@ -9,15 +9,11 @@ Distributed as-is; no warranty is given.
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
+#include <EnableInterrupt.h>
+#include <mcp_can.h>
 
-#define CANSPEED_125 	7		// CAN speed at 125 kbps
-#define CANSPEED_250  	3		// CAN speed at 250 kbps
-#define CANSPEED_500	1		// CAN speed at 500 kbps
-//#include <Canbus.h> // only used CANSPEED_xxx above
-#include <defaults.h>
-#include <global.h>
-#include <mcp2515.h>
-#include <mcp2515_defs.h>
+const int SPI_CS_PIN = 10;
+MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 
 //***************CAN IDs**************
 #define RC_CMD_CAN_ID 0x101
@@ -29,113 +25,183 @@ Distributed as-is; no warranty is given.
 #define COMPASS_CAN_ID 0x133
 #define BATT_CAN_ID 0x140
 
-#define MAESTRO_CMD_CAN_ID 0x102
+//***************IMU Signals In**************
+// NOTE:  The IMU inputs must be pins A4 and A5 because these are the hardware I2C pins
+#define IMU_SDA A4
+#define IMU_SCL A5
 
-//**************Bumper, Battery*********
-#define BATT_PIN A2
-//**************RC signals IN*********
-#define RC_AUTO_PIN 5
-#define RC_SPEED_PIN 6
-#define RC_STEER_PIN 7
+//**************RC Defines*********
+// NOTE:  The CPPM pin must be D8 because the decoding uses the ICP function on D8
+#define RC_CPPM_PIN 8
 #define RC_CENTER 1480
 
-//for RC interrupts, https://ryanboland.com/blog/reading-rc-receiver-values/
-#include <EnableInterrupt.h>
-#define RC_NUM_CHANNELS  3
-#define RC_AUTO 0
+#define RC_NUM_CHANNELS  6
+#define RC_STEER 0
 #define RC_SPEED 1
-#define RC_STEER 2
-uint16_t rc_values[RC_NUM_CHANNELS];
-uint32_t rc_start[RC_NUM_CHANNELS];
+#define RC_LEFT_V 2 // Left joystick vertical movement, unused currently
+#define RC_AUTO 3
+#define SYNC_PULSE_THRESH 3000
+
+#define GYRO_PERIOD 50
+#define HEADING_PERIOD 100
+#define RC_PERIOD 100
+
 volatile uint16_t rc_shared[RC_NUM_CHANNELS];
-
-void rc_read_values() {
-  noInterrupts();
-  memcpy(rc_values, (const void *)rc_shared, sizeof(rc_shared));
-  interrupts();
-}
-
-void calc_input(uint8_t channel, uint8_t input_pin) {
-  if (digitalRead(input_pin) == HIGH) {
-    rc_start[channel] = micros();
-  } else {
-    uint16_t rc_compare = (uint16_t)(micros() - rc_start[channel]);
-    rc_shared[channel] = rc_compare;
-  }
-}
-
-void calc_rc_auto() { calc_input(RC_AUTO, RC_AUTO_PIN); }
-void calc_rc_speed() { calc_input(RC_SPEED, RC_SPEED_PIN); }
-void calc_rc_steer() { calc_input(RC_STEER, RC_STEER_PIN); }
-
-//********************************Setup Loop*********************************//
+volatile uint8_t rc_channel;
+int16_t steer_pwm = 1385;
+int16_t speed_pwm=1350;
+int16_t auto_pwm = 1300;
+int16_t left_v_pwm;
 
 long timeRC, timeGyro, timeHeading, timeBatt;
 int prev_steer, prev_speed;
-int dtheta = 0;
-
-int16_t steer_pwm = 1385, speed_pwm=1350, auto_pwm = 1300;
-
-tCAN msg;
 
 Adafruit_BNO055 bno = Adafruit_BNO055();
+bool bno055Detected = false;
+
+//*****************************************************************
+// The servo pulses are read on a single pin using CPPM format, which
+// encodes the pulses as time between falling edges.  Our receiver is
+// an OrangeRX R617XL bound to a Spektrum DX4e Mode 2 radio.  The 6
+// channels are mapped to 6 sequential pulses as follows:
+// - Pulse #1: Steering (aileron control on aircraft)
+// - Pulse #2: Speed (elevator control on aircraft)
+// - Pulse #3: Unused (throttle control on aircraft)
+// - Pulse #4: Auto (rudder control on aircraft)
+// - Pulse #5: Unused (act/aux switch)
+// - Pulse #6: Unused (trainer bind button)
+// 
+// The pulse widths are measured from falling edge to falling edge.
+// Between groups of pulses is a synchronization signal, which is a
+// pulse of approximately 10 to 15 milliseconds.  Valid pulses are
+// between 1 and 2 milliseconds, so it is easy to distinguish between
+// a sync pulse and a valid servo pulse.  This code uses 3ms as the
+// threshold.  Any pulse greater than 3ms is considered to be a sync
+// pulse.
+//*****************************************************************
+ISR (TIMER1_CAPT_vect)
+{
+  uint16_t captureValue;
+  uint16_t pulseWidth;
+  static uint16_t prevCaptureValue;
+
+  // Calculate the pulse width in us from previous edge to this edge.  The timebase
+  // for Timer1 is set to 2MHz, resulting in a 0.5us resolution.
+  captureValue = ICR1;
+  pulseWidth = (captureValue - prevCaptureValue) / 2; // Timer1 is 0.5us/count; convert to 1us/count
+  prevCaptureValue = captureValue;
+
+  // Detect sync pulse that starts a new set of servo pulses.  Anything greater than 3ms is considered
+  // a sync pulse.
+  if (pulseWidth >= SYNC_PULSE_THRESH)
+  {
+    rc_channel = 0;
+    return;
+  }
+
+  // We only support 6 channels.  Return if more than 6 servo pulses are detected without a sync pulse.
+  if (rc_channel >= RC_NUM_CHANNELS)
+  {
+    return;
+  }
+
+  // Store the pulse width at the appropriate index.
+  rc_shared[rc_channel] = pulseWidth;
+  ++rc_channel;
+}  // end of TIMER1_CAPT_vect
+
+//*****************************************************************
+// Setup the CPPM input, using the Input Capture peripheral and interrupt.
+//*****************************************************************
+void cppmSetup(void)
+{
+
+  pinMode(RC_CPPM_PIN, INPUT);
+  
+  noInterrupts();
+
+  // Init to invalid channel, which will cause the ISR to wait for a sync pulse
+  rc_channel = 255;
+
+  // Setup Timer1 for input capture, 0.5us resolution, ICP interrupt enabled
+  TCCR1A = 0b00000000;  // No output compare or waveform generation
+  TCCR1B = 0b00000010; // Input capture on falling edge; prescale /8
+  bitSet(TIMSK1, ICIE1);  // Enable Input Capture interrupt
+  
+  interrupts();
+}
+
+//*****************************************************************
+// Copy the RC pulse widths to an 
+//*****************************************************************
+void rc_read_values() {
+  noInterrupts();
+  steer_pwm = rc_shared[RC_STEER];
+  speed_pwm = rc_shared[RC_SPEED];
+  auto_pwm = rc_shared[RC_AUTO];
+  left_v_pwm = rc_shared[RC_LEFT_V];
+  // Clear the pulses in the array after copying them.  This is used
+  // to detect if the pulse train is not being received.
+  rc_shared[RC_STEER] = rc_shared[RC_SPEED] = rc_shared[RC_AUTO] = rc_shared[RC_LEFT_V] = 0;
+  interrupts();
+}
+
+//********************************Setup Loop*********************************//
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   Serial.println("CAN Write - Testing transmission of CAN Bus messages");
   delay(200);
   
-  if(mcp2515_init(CANSPEED_500))  //Initialise MCP2515 CAN controller at the specified speed
-    Serial.println("CAN Init ok");
-  else
-    Serial.println("Can't init CAN");
 
-  pinMode(RC_AUTO_PIN, INPUT);
-  pinMode(RC_SPEED_PIN, INPUT);
-  pinMode(RC_STEER_PIN, INPUT);
+  while (CAN_OK != CAN.begin(CAN_500KBPS, MCP_16MHz))
+  {
+      /*Serial.println("CAN BUS Module Failed to Initialized");
+      Serial.println("Retrying....");*/
+      delay(500);
+      
+  }
 
-  enableInterrupt(RC_AUTO_PIN, calc_rc_auto, CHANGE);
-  enableInterrupt(RC_SPEED_PIN, calc_rc_speed, CHANGE);
-  enableInterrupt(RC_STEER_PIN, calc_rc_steer, CHANGE);
-  
   if(!bno.begin())
   {
     /* There was a problem detecting the BNO055 ... check your connections */
-    Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+    Serial.println("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
     // Send CAN ERROR MESSAGE, Software Reset, continue, do NOT use while(1)
-    while(1);
   }
-    
-  delay(200);
-  bno.setExtCrystalUse(true);
+  else
+  {
+    bno055Detected = true;
+    Serial.println("BNO055 detected");
+    delay(200);
+    bno.setExtCrystalUse(true);
+  }
+
+  // Set up the CPPM input pin and interrupt.
+  cppmSetup();
+
   timeRC = millis();
   timeGyro = millis();
   timeBatt = millis();
   timeHeading = millis();
+
+  Serial.println("Setup complete");
 }
 
 //********************************Main Loop*********************************//
 
 void loop() 
 {
-  if(millis() - timeBatt > 5000)
-  {
-    int16_t raw_battery_signal = analogRead(BATT_PIN);
-    tx_can(BATT_CAN_ID, raw_battery_signal, 0, 0, 0);
-    //Serial.print("Raw Battery: ");
-    //Serial.println(raw_battery_signal);
-    timeBatt = millis();
-  }
-  
-  if(millis() - timeGyro > 50)
+  if(bno055Detected && (timeSince(timeGyro) > GYRO_PERIOD))
   {
     imu::Vector<3> gyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
-    /*Serial.print("X: ");
+#if 0
+    Serial.print("X: ");
     Serial.print(gyro.x());
     Serial.print(" Y: ");
     Serial.print(gyro.y());
     Serial.print(" Z: ");
-    Serial.println(gyro.z());*/
+    Serial.println(gyro.z());
+#endif
     int16_t gyroXcentiDeg = int(gyro.x()*180.0/3.1416*100);
     int16_t gyroYcentiDeg = int(gyro.y()*180.0/3.1416*100);
     int16_t gyroZcentiDeg = int(gyro.z()*180.0/3.1416*100);
@@ -144,19 +210,21 @@ void loop()
     timeGyro = millis();
   }
   
-  if(millis() - timeHeading > 100)
+  if(bno055Detected && (timeSince(timeHeading) > HEADING_PERIOD))
   {
     sensors_event_t event; 
     bno.getEvent(&event);
     float heading = (float)event.orientation.x;
-    //float y = (float)event.orientation.y;
-    //float z = (float)event.orientation.z;
-    /*Serial.print("orientation x, y, z: ");
+#if 0
+    float y = (float)event.orientation.y;
+    float z = (float)event.orientation.z;
+    Serial.print("orientation x, y, z: ");
     Serial.print(heading );
     Serial.print(", ");
     Serial.print(y );
     Serial.print(", ");
-    Serial.println(z );*/
+    Serial.println(z );
+#endif
     if(heading > 180.0)
     {
         heading -= 360.0;
@@ -179,80 +247,22 @@ void loop()
     timeHeading = millis();
   }
   
-  //SEND RAW RC CMDS
-  if(millis() - timeRC > 100)
+  // Send RC pulse widths
+  if(timeSince(timeRC) > RC_PERIOD)
   {
-    rc_read_values();
-    auto_pwm = rc_values[RC_AUTO];
-    if(auto_pwm < 1600)
-    {
-      speed_pwm = rc_values[RC_SPEED];
-      steer_pwm = rc_values[RC_STEER];
-      tx_can(RC_CMD_CAN_ID, speed_pwm, steer_pwm, auto_pwm, 0);
-      tx_rc_can(MAESTRO_CMD_CAN_ID, steer_pwm, speed_pwm);
-      
-      if(speed_pwm < 100)
-      {Serial.print("speed rc: "); Serial.println(speed_pwm);}
-      if(steer_pwm < 100)
-      {Serial.print("steer rc: "); Serial.println(steer_pwm);}
-      if(auto_pwm < 100)
-      {Serial.print("auto rc: "); Serial.println(auto_pwm);}
-      
-    }
-    else
-    {
-      tx_can(RC_CMD_CAN_ID, 1350, 1385, auto_pwm, 0);
-      tx_rc_can(MAESTRO_CMD_CAN_ID, 1385, 1350);
-    }
-    //tx_can(TEST_CAN_ID, 1350, 1500, 0, 0);
+    rc_read_values(); // Get the RC values into global variables auto_pwm, speed_pwm, and steer_pwm
+    tx_can(RC_CMD_CAN_ID, steer_pwm, speed_pwm, auto_pwm, left_v_pwm);
+#if 0
+    Serial.print("Speed: ");
+    Serial.print(speed_pwm);
+    Serial.print(" Steer: ");
+    Serial.print(steer_pwm);
+    Serial.print(" auto: ");
+    Serial.println(auto_pwm);
+#endif
     timeRC = millis();
   }
-  
-  /*if(rx_can(&msg))
-  {
-    if(msg.id == 0x202)
-    {
-      Serial.print("rx msg: ");
-      Serial.print(convertCAN(msg,0));
-      Serial.print(", ");
-      Serial.println(convertCAN(msg,2));
-      Serial.println("enc left, enc right, speed pwm, steeer pwm:");
-      Serial.print(enc_left); Serial.print(", ");
-      Serial.print(enc_right); Serial.print(", ");
-      Serial.print(speed_pwm); Serial.print(", ");
-      Serial.println(steer_pwm);
-    }
-  }*/
 
-}
-
-uint8_t tx_rc_can(uint16_t id, int16_t steer_pwm, int16_t speed_pwm)
-{
-  /*Serial.print("steer, speed: ");
-  Serial.print(steer_pwm); Serial.print(", ");
-  Serial.println(speed_pwm);*/
-  int8_t cmd[8];
-  cmd[0] = -(steer_pwm-RC_CENTER)/4;
-  cmd[1] = -cmd[0];
-  cmd[2] = cmd[0];
-  cmd[3] = -cmd[0];;
-  cmd[4] = (speed_pwm-RC_CENTER)/4;
-  cmd[5] = cmd[4];
-  cmd[6] = 0;
-  cmd[7] = 0;
-  
-  tCAN message;
-
-  message.id = id; //0x631; //formatted in HEX
-  message.header.rtr = 0;
-  message.header.length = 8; //formatted in DEC
-  for(unsigned k=0; k<8; ++k)
-  {
-    message.data[k] = uint8_t(cmd[k] + 128);
-  }
-  
-  mcp2515_bit_modify(CANCTRL, (1<<REQOP2)|(1<<REQOP1)|(1<<REQOP0), 0);
-  return mcp2515_send_message(&message);
 }
 
 uint8_t tx_can(uint16_t id, int16_t num1, int16_t num2, int16_t num3, int16_t num4)
@@ -262,72 +272,26 @@ uint8_t tx_can(uint16_t id, int16_t num1, int16_t num2, int16_t num3, int16_t nu
   uint16_t raw3 = num3 + 32768;
   uint16_t raw4 = num4 + 32768;
   
-  tCAN message;
-
+  /*tCAN message;
   message.id = id; //0x631; //formatted in HEX
   message.header.rtr = 0;
-  message.header.length = 8; //formatted in DEC
-  message.data[0] = getByte(raw1,1);
-  message.data[1] = getByte(raw1,0);
-  message.data[2] = getByte(raw2,1);
-  message.data[3] = getByte(raw2,0);
-  message.data[4] = getByte(raw3,1);
-  message.data[5] = getByte(raw3,0);
-  message.data[6] = getByte(raw4,1);
-  message.data[7] = getByte(raw4,0);
+  message.header.length = 8; //formatted in DEC */
+  unsigned char data[8];
+  data[0] = raw1 >> 8;
+  data[1] = raw1 & 0xFF;
+  data[2] = raw2 >> 8;
+  data[3] = raw2 & 0xFF;
+  data[4] = raw3 >> 8;
+  data[5] = raw3 & 0xFF;
+  data[6] = raw4 >> 8;
+  data[7] = raw4 & 0xFF;
   
-  mcp2515_bit_modify(CANCTRL, (1<<REQOP2)|(1<<REQOP1)|(1<<REQOP0), 0);
-  return mcp2515_send_message(&message);
-}
-/*
-typedef struct
-{
-	uint16_t id;
-	struct {
-		int8_t rtr : 1;
-		uint8_t length : 4;
-	} header;
-	uint8_t data[8];
-} tCAN;
-*/
-boolean rx_can(tCAN *message)
-{
-  if (mcp2515_check_message()) 
-  {
-    if (mcp2515_get_message(message)) 
-    {
-      //if(message.id == 0x620 and message.data[2] == 0xFF)  //uncomment when you want to filter
-         
-       Serial.print("ID: ");
-       Serial.print(message->id,HEX);
-       Serial.print(", ");
-       Serial.print("Data: ");
-       Serial.print(message->header.length,DEC);
-       for(int i=0;i<message->header.length;i++) 
-       {	
-          Serial.print(message->data[i],HEX);
-          Serial.print(" ");
-       }
-       Serial.println("");
-     }
-     else
-     {
-       return false;
-     }
-  }
-  else
-  {
-    return false;
-  }
-  return true;
+  CAN.sendMsgBuf(id,0, 8, data); //id, 0 means NOT extended ID
+  return 0;
+  
 }
 
-uint16_t convertCAN(tCAN message, unsigned int start_byte) //start byte is 0 to 7, left to right
+uint16_t timeSince(uint16_t startTime)
 {
-  return (message.data[start_byte] << 8 ) + (message.data[start_byte+1]) - 32768;
-}
-
-uint8_t getByte(uint16_t x, unsigned int n)
-{
-  return (x >> 8*n) & 0xFF;
+  return (uint16_t)(millis() - startTime);
 }
