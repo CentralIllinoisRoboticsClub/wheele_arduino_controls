@@ -20,6 +20,10 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 #define MAX_SPEED 16.0
 // Define maximum curvature in 1/m.  A curvature of 2.0 corresponds to turning radius of 0.5 meter.
 #define MAX_CURVATURE 2.0
+// Define the velocity for turning in place, in m/s
+#define TURN_IN_PLACE_VELOCITY 1.0
+// Define maximum velocity in m/s
+#define MAX_VELOCITY 2.0
 
 //***************CAN IDs**************
 #define RC_CMD_CAN_ID 0x101
@@ -30,8 +34,7 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 #define ACCEL_CAN_ID 0x132
 #define COMPASS_CAN_ID 0x133
 #define POWER_CAN_ID 0x140
-#define RAW_THRUST_CAN_ID 0x301
-#define RAW_STEER_CAN_ID 0x302
+#define CMD_VEL 0x301
 
 //**************Bumper*********
 #define BUMP_PIN A0
@@ -48,12 +51,12 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 #define LEFT_ENC_B A5
 
 //*************Servos/ESCs***
-#define RL_SERVO 4
-#define RR_SERVO 5
-#define FR_SERVO 6
-#define FL_SERVO 7
-#define RIGHT_ESC 8
-#define LEFT_ESC 9
+#define RL_SERVO 9
+#define RR_SERVO 8
+#define FR_SERVO 7
+#define FL_SERVO 6
+#define RIGHT_ESC 5
+#define LEFT_ESC 4
 //*************Data Frequency, Periods*********
 #define SERVO_CHECK_PERIOD 1000  
 #define BATTERY_PERIOD 1000
@@ -149,15 +152,10 @@ void loop()
       timeServoCheck = millis();
       parseRCCmd(msg);
     }
-    else if(rxId == RAW_THRUST_CAN_ID)
+    else if(rxId == CMD_VEL)
     {
       // Received a thrust packet.  Parse the packet.
-      parseThrustCmd(msg);
-    }
-    else if(rxId == RAW_STEER_CAN_ID)
-    {
-      // Received a steer packet.  Parse the packet.
-      parseSteerCmd(msg);
+      parseCmdVel(msg);
     }
   }
 
@@ -236,6 +234,7 @@ void loop()
 
 }
 
+//*************************************************************************************
 uint8_t tx_can(uint16_t id, int16_t num1, int16_t num2, int16_t num3, int16_t num4)
 {
   uint16_t raw1 = num1 + 32768;
@@ -262,15 +261,21 @@ uint8_t tx_can(uint16_t id, int16_t num1, int16_t num2, int16_t num3, int16_t nu
   
 }
 
+//*************************************************************************************
 int16_t convertCAN(unsigned char data[], unsigned int start_byte) //start byte is 0 to 7, left to right
 {
   return (data[start_byte] << 8 ) + (data[start_byte+1]) - 32768;
 }
 
+//*************************************************************************************
 void parseRCCmd(unsigned char * data)
 {
-  uint16_t speedPwm, steerPwm, autoPwm;
-  float spd, curvature, dx, dy, spdLeft, spdRight, steerLeft, steerRight, absSpd;
+  uint16_t speedPwm;
+  uint16_t steerPwm;
+  uint16_t autoPwm;
+  float velocity;
+  float curvature;
+  
 #if 0  
   Serial.print(data[0]); Serial.print(", ");
   Serial.print(data[1]); Serial.print(", ");
@@ -285,6 +290,15 @@ void parseRCCmd(unsigned char * data)
   autoPwm = ((uint16_t)data[4] << 8) + data[5] - 32768;
   steerPwm = ((uint16_t)data[0] << 8) + data[1] - 32768;
   speedPwm = ((uint16_t)data[2] << 8) + data[3] - 32768;
+
+  // Limit pulse widths to range [1000, 2000] microseconds
+  if (autoPwm < 1000) autoPwm = 1000;
+  else if (autoPwm > 2000) autoPwm = 2000;
+  if (steerPwm < 1000) steerPwm = 1000;
+  else if (steerPwm > 2000) steerPwm = 2000;
+  if (speedPwm < 1000) speedPwm = 1000;
+  else if (speedPwm > 2000) speedPwm = 2000;
+
 #if 0
   Serial.print(autoPwm); Serial.print(", ");
   Serial.print(speedPwm); Serial.print(", ");
@@ -299,83 +313,158 @@ void parseRCCmd(unsigned char * data)
 
   if (!autoMode)
   {
-    // Manual operation mode.  Get speed and curvature.
-    spd = (speedPwm - 1500.0) / 500.0;
-    curvature = (steerPwm - 1500.0) * MAX_CURVATURE / 500;
-    // Calculate left/right speeds in m/s and wheel angles in radians
-    dy = curvature * WHEELBASE_LENGTH / 2;
-    dx = 1 + curvature * WHEELBASE_WIDTH / 2;
-    spdLeft = spd * sqrt(dx * dx + dy * dy);
-    steerLeft = 90.0 + atan(dy / dx) * 180.0 / 3.1416;
-    dx = 1 - curvature * WHEELBASE_WIDTH / 2;
-    spdRight = spd * sqrt(dx * dx + dy * dy);
-    steerRight = 90.0 + atan(dy / dx) * 180.0 / 3.1416;
-    // Adjust speed left/right if needed to keep in range +/-1.0
-    absSpd = fabs(spdRight);
-    if (absSpd < 1.0)
-      absSpd = fabs(spdLeft);
-    if (absSpd > 1.0) 
-    {
-      spdRight /= absSpd;
-      spdLeft /= absSpd;
-    }
+    // Manual operation mode.  Get speed and curvature, and update the servo outputs.
+    // 25us deadband
+    if ((speedPwm > 1475) && (speedPwm < 1525))
+      speedPwm = 1500;
+    if ((steerPwm > 1475) && (steerPwm < 1525))
+      steerPwm = 1500;
+    // Compute speed and curvature.  Positive curvature is defined as CCW, which corresponds
+    // to steerPwm less than 1500.
+    velocity = (speedPwm - 1500.0) * MAX_VELOCITY / 500.0;
+    curvature = -(steerPwm - 1500.0) * MAX_CURVATURE / 500;
+    
+    updateServos(velocity, curvature);
+  }
+}
+
+//*************************************************************************************
+void parseCmdVel(unsigned char * data)
+{
+  float curvature;
+  float velocity;
+  
+  // Only honor CmdVel commands if in auto mode
+  if (!autoMode)
+    return;
+
+  // Get velocity and yaw rate from command
+  int16_t velMmPerSec = ((uint16_t)data[0] << 8) + data[1] - 32768;
+  int16_t yawRateDeciDeg = ((uint16_t)data[2] << 8) + data[3] - 32768;
+  
+  // Convert to floating point and standard units
+  velocity = velMmPerSec / 1000.0;                   // meters/second
+  float yawRate = yawRateDeciDeg * 3.14159 / 1800.0;      // radians/second
+
 #if 0
-  Serial.print(spd); Serial.print(", ");
-  Serial.print(curvature); Serial.print(", ");
-  Serial.print(spdLeft); Serial.print(", ");
-  Serial.println(spdRight);
-  Serial.print(spdLeft * 500 + 1500); Serial.print(", ");
-  Serial.print(spdRight * 500 + 1500); Serial.print(", ");
-  Serial.print(steerLeft); Serial.print(", ");
-  Serial.println(steerRight);
+  Serial.print("Vel mm/s = ");
+  Serial.print(velMmPerSec);
+  Serial.print(", Yaw deciDeg/sec = ");
+  Serial.println(yawRateDeciDeg);
+  Serial.print("Vel m/s = ");
+  Serial.print(velocity);
+  Serial.print(", Yaw rad/sec = ");
+  Serial.println(yawRate);
 #endif
-    // Convert speeds to pwm and output
-    leftESC.writeMicroseconds(spdLeft * 500 + 1500);
-    rightESC.writeMicroseconds(spdRight * 500 + 1500);
-    // Convert angles to pwm and output
-    frontLeftSteerServo.write(steerLeft);
-    frontRightSteerServo.write(steerRight);
-    rearLeftSteerServo.write(180.0 - steerLeft);
-    rearRightSteerServo.write(180.0 - steerRight);
-  }
-}
-
-void parseThrustCmd(unsigned char * data)
-{
-  uint16_t leftESCpwm;
-  uint16_t rightESCpwm;
-
-  // Only honor thrust commands if in auto mode
-  if (autoMode)
+  
+  // Handle case where velocity is 0.  Use integer value for equality comparison.
+  if (velMmPerSec == 0)
   {
-    leftESCpwm = ((uint16_t)data[0] << 8) + data[1];
-    rightESCpwm = ((uint16_t)data[2] << 8) + data[3];
-    leftESC.writeMicroseconds(leftESCpwm);
-    rightESC.writeMicroseconds(rightESCpwm);
+    // If velocity and yaw are both zero, then curvature is zero
+    if (yawRateDeciDeg == 0)
+      curvature = 0.0;
+    else
+    {
+      // If velocity is zero but yaw is non-zero, this indicates an attempt
+      // to turn in place, which Wheel-E cannot do.  Turn in the direction
+      // indicated as sharply as possible.
+      // NOTE:  consider computing the velocity needed to get the commanded
+      //   yaw rate with the given curvature
+      velocity = TURN_IN_PLACE_VELOCITY;
+      if (yawRate > 0.0)
+        curvature = MAX_CURVATURE;
+      else
+        curvature = -MAX_CURVATURE;
+    }
   }
-}
-
-void parseSteerCmd(unsigned char * data)
-{
-  uint16_t frontLeftServoPwm;
-  uint16_t frontRightServoPwm;
-  uint16_t rearLeftServoPwm;
-  uint16_t rearRightServoPwm;
-
-  // Only honor servo commands if in auto mode
-  if (autoMode)
+  else
   {
-    frontLeftServoPwm = ((uint16_t)data[0] << 8) + data[1];
-    frontRightServoPwm = ((uint16_t)data[2] << 8) + data[3];
-    rearLeftServoPwm = ((uint16_t)data[4] << 8) + data[5];
-    rearRightServoPwm = ((uint16_t)data[6] << 8) + data[7];
-    frontLeftSteerServo.writeMicroseconds(frontLeftServoPwm);
-    frontRightSteerServo.writeMicroseconds(frontRightServoPwm);
-    rearLeftSteerServo.writeMicroseconds(rearLeftServoPwm);
-    rearRightSteerServo.writeMicroseconds(rearRightServoPwm);
+    // Limit velocity to the maximum
+    if (velocity > MAX_VELOCITY)
+      velocity = MAX_VELOCITY;
+    else if (velocity < -MAX_VELOCITY)
+      velocity = -MAX_VELOCITY;
+    // Velocity is non-zero, so compute the curvature
+    curvature = yawRate / velocity;
+    if (curvature > MAX_CURVATURE)
+      curvature = MAX_CURVATURE;
+    else if (curvature < -MAX_CURVATURE)
+      curvature = -MAX_CURVATURE;
   }
+
+#if 0
+  Serial.print("Vel m/s = ");
+  Serial.print(velocity);
+  Serial.print(", Curvature 1/m = ");
+  Serial.println(curvature);
+#endif
+  
+  // Send commands to ESCs and servos to move according to the calculated velocity and curvature.
+  updateServos(velocity, curvature);
 }
 
+//*************************************************************************************
+void updateServos(float velocity, float curvature)
+{
+  float dx, dy, spdLeft, spdRight, steerLeft, steerRight, spdAdj, spdAbsMax, spdTemp;
+
+  // Calculate left/right speeds in m/s and wheel angles in radians
+  dy = curvature * WHEELBASE_LENGTH / 2;
+  dx = 1 - curvature * WHEELBASE_WIDTH / 2;
+  spdLeft = sqrt(dx * dx + dy * dy);
+  steerLeft = 90.0 + atan(dy / dx) * 180.0 / 3.1416;
+  dx = 1 + curvature * WHEELBASE_WIDTH / 2;
+  spdRight = sqrt(dx * dx + dy * dy);
+  steerRight = 90.0 + atan(dy / dx) * 180.0 / 3.1416;
+  // Adjust speeds so the mean of left & right equals the commanded velocity
+  spdAdj = velocity * 2 / (spdRight + spdLeft);
+  spdLeft *= spdAdj;
+  spdRight *= spdAdj;
+  
+  // Adjust speed left/right if needed to keep in range +/- MAX_VELOCITY.
+  // First find the larger of the max speeds.
+  spdAbsMax = fabs(spdRight);
+  spdTemp = fabs(spdLeft);
+  if (spdTemp > spdAbsMax)
+    spdAbsMax = spdTemp;
+  // Adjust speeds if needed, maintaining the same ratio
+  if (spdAbsMax > MAX_VELOCITY) 
+  {
+    spdAdj = MAX_VELOCITY / spdAbsMax;
+    spdRight *= spdAdj;
+    spdLeft *= spdAdj;
+  }
+
+  // Convert speeds to pwm
+  spdRight = spdRight * 500 / MAX_VELOCITY + 1500;
+  spdLeft = spdLeft * 500 / MAX_VELOCITY + 1500;
+  
+#if 0
+  Serial.print("Left ESC us = ");
+  Serial.print(spdLeft);
+  Serial.print(", Right = ");
+  Serial.println(spdRight);
+  Serial.print("FL Steer us = ");
+  Serial.print(steerLeft);
+  Serial.print(", RL = ");
+  Serial.print(180.0 - steerLeft);
+  Serial.print(", FR = ");
+  Serial.print(steerRight);
+  Serial.print(", RR = ");
+  Serial.println(180.0 - steerRight);
+#endif
+  
+  // Convert speeds to pwm and output
+  leftESC.writeMicroseconds(spdLeft);
+  rightESC.writeMicroseconds(spdRight);
+  // Convert angles to pwm and output
+  frontLeftSteerServo.write(steerLeft);
+  frontRightSteerServo.write(steerRight);
+  rearLeftSteerServo.write(180.0 - steerLeft);
+  rearRightSteerServo.write(180.0 - steerRight);
+}
+
+//*************************************************************************************
 void left_enc_tick()
 {
   // modify using PORT operations for efficiency
@@ -389,6 +478,7 @@ void left_enc_tick()
   }
 }
 
+//*************************************************************************************
 void right_enc_tick()
 {
   // modify using PORT operations for efficiency
@@ -402,6 +492,7 @@ void right_enc_tick()
   }
 }
 
+//*************************************************************************************
 uint16_t timeSince(uint16_t startTime)
 {
   return (uint16_t)(millis() - startTime);
