@@ -53,10 +53,15 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 //*************Servos/ESCs***
 #define RL_SERVO 9
 #define RR_SERVO 8
-#define FR_SERVO 7
-#define FL_SERVO 6
+#define FL_SERVO 7
+#define FR_SERVO 6
 #define RIGHT_ESC 5
 #define LEFT_ESC 4
+//*************Servo Center Calibration************
+#define RL_SERVO_OFFSET (40 * 180.0 / 1000.0)
+#define RR_SERVO_OFFSET (120 * 180.0 / 1000.0)
+#define FL_SERVO_OFFSET (100 * 180.0 / 1000.0)
+#define FR_SERVO_OFFSET (0 * 180.0 / 1000.0)
 //*************Data Frequency, Periods*********
 #define SERVO_CHECK_PERIOD 1000  
 #define BATTERY_PERIOD 1000
@@ -458,10 +463,10 @@ void updateServos(float velocity, float curvature)
   leftESC.writeMicroseconds(spdLeft);
   rightESC.writeMicroseconds(spdRight);
   // Convert angles to pwm and output
-  frontLeftSteerServo.write(steerLeft);
-  frontRightSteerServo.write(steerRight);
-  rearLeftSteerServo.write(180.0 - steerLeft);
-  rearRightSteerServo.write(180.0 - steerRight);
+  frontLeftSteerServo.write(steerLeft + FL_SERVO_OFFSET);
+  frontRightSteerServo.write(steerRight + FR_SERVO_OFFSET);
+  rearLeftSteerServo.write(180.0 - steerLeft + RL_SERVO_OFFSET);
+  rearRightSteerServo.write(180.0 - steerRight + RR_SERVO_OFFSET);
 }
 
 //*************************************************************************************
