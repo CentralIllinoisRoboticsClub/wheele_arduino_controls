@@ -405,7 +405,7 @@ void parseCmdVel(unsigned char * data)
 #endif
   
   // Send commands to ESCs and servos to move according to the calculated velocity and curvature.
-  updateServos(velocity, curvature);
+  updateServos(velocity, -curvature);
 }
 
 //*************************************************************************************
@@ -460,13 +460,13 @@ void updateServos(float velocity, float curvature)
 #endif
   
   // Convert speeds to pwm and output
-  leftESC.writeMicroseconds(3000 - spdLeft);
-  rightESC.writeMicroseconds(3000 - spdRight);
+  leftESC.writeMicroseconds(3000 - spdRight);
+  rightESC.writeMicroseconds(3000 - spdLeft);
   // Convert angles to pwm and output
-  frontLeftSteerServo.write(steerRight + FL_SERVO_OFFSET);
-  frontRightSteerServo.write(steerLeft + FR_SERVO_OFFSET);
-  rearLeftSteerServo.write(180.0 - steerRight + RL_SERVO_OFFSET);
-  rearRightSteerServo.write(180.0 - steerLeft + RR_SERVO_OFFSET);
+  frontLeftSteerServo.write(steerLeft + FL_SERVO_OFFSET);
+  frontRightSteerServo.write(steerRight + FR_SERVO_OFFSET);
+  rearLeftSteerServo.write(180.0 - steerLeft + RL_SERVO_OFFSET);
+  rearRightSteerServo.write(180.0 - steerRight + RR_SERVO_OFFSET);
 }
 
 //*************************************************************************************
