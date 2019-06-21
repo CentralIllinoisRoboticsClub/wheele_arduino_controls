@@ -202,11 +202,33 @@ void loop()
     Serial.print(" Z: ");
     Serial.println(gyro.z());
 #endif
-    int16_t gyroXcentiDeg = int(gyro.x()*180.0/3.1416*100);
-    int16_t gyroYcentiDeg = int(gyro.y()*180.0/3.1416*100);
-    int16_t gyroZcentiDeg = int(gyro.z()*180.0/3.1416*100);
+    // Gyro values are returned in float degrees/second.  Convert to int16 centi degrees/sec.
+    int16_t gyroXcentiDeg = int(gyro.x() * 100.0);
+    int16_t gyroYcentiDeg = int(gyro.y() * 100.0);
+    int16_t gyroZcentiDeg = int(gyro.z() * 100.0);
     //Serial.println(gyroZcentiDeg);
     tx_can(GYRO_CAN_ID, gyroXcentiDeg, gyroYcentiDeg, gyroZcentiDeg, 0);
+#if 0
+    // Display the mean dps over 20 readings (1 second)
+    static float gxSum, gySum, gzSum;
+    static uint8_t gyroMeanCount;
+    gxSum += gyro.x();
+    gySum += gyro.y();
+    gzSum += gyro.z();
+    ++gyroMeanCount;
+    if (gyroMeanCount >= 20)
+    {
+      Serial.print("X: ");
+      Serial.print(gxSum / 20.0);
+      Serial.print(" Y: ");
+      Serial.print(gySum / 20.0);
+      Serial.print(" Z: ");
+      Serial.println(gzSum / 20.0);
+      gxSum = gySum = gzSum = 0.0;
+      gyroMeanCount = 0;
+    }
+#endif
+
     timeGyro = millis();
   }
   
