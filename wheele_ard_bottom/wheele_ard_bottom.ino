@@ -6,6 +6,25 @@ Used with permission 2016. License CC By SA.
 Distributed as-is; no warranty is given.
 *************************************************************************/
 
+/****************************************************************************
+** Planned updates:
+** 1. Add EEPROM storage of tuning parameters
+**    - Servo offsets
+**    - Odometer counts per meter
+**    - Max velocity
+**    - Max curvature
+**    - Robot wheelebase length & width
+**    - Battery voltage & current scale & offset
+**    - Speed control KP, KI, & KD
+**    - Speed control feed-forward term if needed
+** 2. Add CAN messages to update EEPROM tuning parameters
+**    - Message to set given parameter in RAM
+**    - Message to read parameter from EEPROM or RAM
+**    - Message to store parameters from RAM to EEPROM
+** 3. Add closed loop speed control based on odometer reading
+** 4. For steering servos, use writeMicroseconds() instead of write()
+*************************************************************************/
+
 #include <mcp_can.h>
 #include <SPI.h>
 #include <Servo.h>
@@ -16,8 +35,6 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 // Define wheelbase in meters
 #define WHEELBASE_WIDTH (23.0 * 2.54 / 100)
 #define WHEELBASE_LENGTH (12.5 * 2.54 / 100)
-// Define maximum (full throttle) speed in m/s
-#define MAX_SPEED 16.0
 // Define maximum curvature in 1/m.  A curvature of 2.0 corresponds to turning radius of 0.5 meter.
 #define MAX_CURVATURE 2.0
 // Define the velocity for turning in place, in m/s
@@ -57,11 +74,24 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 #define FR_SERVO 6
 #define RIGHT_ESC 5
 #define LEFT_ESC 4
-//*************Servo Center Calibration************
-#define RL_SERVO_OFFSET (40 * 180.0 / 1000.0)
-#define RR_SERVO_OFFSET (120 * 180.0 / 1000.0)
-#define FL_SERVO_OFFSET (100 * 180.0 / 1000.0)
-#define FR_SERVO_OFFSET (0 * 180.0 / 1000.0)
+//*************Steering Servo Calibration************
+//#define RL_SERVO_OFFSET (40 * 180.0 / 1000.0)
+//#define RR_SERVO_OFFSET (120 * 180.0 / 1000.0)
+//#define FL_SERVO_OFFSET (100 * 180.0 / 1000.0)
+//#define FR_SERVO_OFFSET (0 * 180.0 / 1000.0)
+#define SERVO_US_PER_DEG 17.0
+#define FL_SERVO_MIN    1250
+#define FL_SERVO_CENTER 1600
+#define FL_SERVO_MAX    2000
+#define FR_SERVO_MIN    1030
+#define FR_SERVO_CENTER 1500
+#define FR_SERVO_MAX    1840
+#define RL_SERVO_MIN    1150
+#define RL_SERVO_CENTER 1540
+#define RL_SERVO_MAX    1900
+#define RR_SERVO_MIN    1300
+#define RR_SERVO_CENTER 1620
+#define RR_SERVO_MAX    2000
 //*************Data Frequency, Periods*********
 #define SERVO_CHECK_PERIOD 1000  
 #define BATTERY_PERIOD 1000
@@ -320,10 +350,29 @@ void parseRCCmd(unsigned char * data)
   {
     // Manual operation mode.  Get speed and curvature, and update the servo outputs.
     // 25us deadband
-    if ((speedPwm > 1475) && (speedPwm < 1525))
-      speedPwm = 1500;
     if ((steerPwm > 1475) && (steerPwm < 1525))
       steerPwm = 1500;
+    if ((speedPwm > 1475) && (speedPwm < 1525))
+    {
+      // If speed is in deadband, then use the steer RC to turn in place.
+      if (steerPwm == 1500)
+        speedPwm = 1500;  // If both speed and steer are in deadband, do nothing.
+      else
+      {
+        // Set steer PWM to max magnitude, and set speed PWM to forward, with speed
+        // proportional to steer
+        if (steerPwm > 1500)
+        {
+          speedPwm = steerPwm;
+          steerPwm = 2000;
+        }
+        else
+        {
+          speedPwm = 3000 - steerPwm;
+          steerPwm = 1000;
+        }
+      }
+    }
     // Compute speed and curvature.  Positive curvature is defined as CCW, which corresponds
     // to steerPwm less than 1500.
     velocity = (speedPwm - 1500.0) * MAX_VELOCITY / 500.0;
@@ -411,33 +460,34 @@ void parseCmdVel(unsigned char * data)
 //*************************************************************************************
 void updateServos(float velocity, float curvature)
 {
-  float dx, dy, spdLeft, spdRight, steerLeft, steerRight, spdAdj, spdAbsMax, spdTemp;
+  float cdxL, cdxR, cdy, spdLeft, spdRight, steerLeft, steerRight, spdAbs;
+  uint16_t pw;
 
   // Calculate left/right speeds in m/s and wheel angles in radians
-  dy = curvature * WHEELBASE_LENGTH / 2;
-  dx = 1 - curvature * WHEELBASE_WIDTH / 2;
-  spdLeft = sqrt(dx * dx + dy * dy);
-  steerLeft = 90.0 + atan(dy / dx) * 180.0 / 3.1416;
-  dx = 1 + curvature * WHEELBASE_WIDTH / 2;
-  spdRight = sqrt(dx * dx + dy * dy);
-  steerRight = 90.0 + atan(dy / dx) * 180.0 / 3.1416;
-  // Adjust speeds so the mean of left & right equals the commanded velocity
-  spdAdj = velocity * 2 / (spdRight + spdLeft);
-  spdLeft *= spdAdj;
-  spdRight *= spdAdj;
+  cdy = curvature * WHEELBASE_LENGTH / 2;
+  cdxL = 1.0 - curvature * WHEELBASE_WIDTH / 2;
+  
+  spdLeft = sqrt(cdxL * cdxL + cdy * cdy) * velocity;
+  steerLeft = atan(cdy / cdxL) * 180.0 / 3.1416;
+
+  cdxR = 1.0 + curvature * WHEELBASE_WIDTH / 2;
+  spdRight = sqrt(cdxR * cdxR + cdy * cdy) * velocity;
+  steerRight = atan(cdy / cdxR) * 180.0 / 3.1416;
   
   // Adjust speed left/right if needed to keep in range +/- MAX_VELOCITY.
-  // First find the larger of the max speeds.
-  spdAbsMax = fabs(spdRight);
-  spdTemp = fabs(spdLeft);
-  if (spdTemp > spdAbsMax)
-    spdAbsMax = spdTemp;
-  // Adjust speeds if needed, maintaining the same ratio
-  if (spdAbsMax > MAX_VELOCITY) 
+  // If the velocity passed by the caller is in the valid range, then only one of the
+  // left/right might end up outside the range, but check both just in case.
+  spdAbs = fabs(spdLeft);
+  if (spdAbs > MAX_VELOCITY)
   {
-    spdAdj = MAX_VELOCITY / spdAbsMax;
-    spdRight *= spdAdj;
-    spdLeft *= spdAdj;
+    spdLeft /= spdAbs;
+    spdRight /= spdAbs;
+  }
+  spdAbs = fabs(spdRight);
+  if (spdAbs > MAX_VELOCITY)
+  {
+    spdLeft /= spdAbs;
+    spdRight /= spdAbs;
   }
 
   // Convert speeds to pwm
@@ -462,11 +512,30 @@ void updateServos(float velocity, float curvature)
   // Convert speeds to pwm and output
   leftESC.writeMicroseconds(3000 - spdRight);
   rightESC.writeMicroseconds(3000 - spdLeft);
-  // Convert angles to pwm and output
-  frontLeftSteerServo.write(steerLeft + FL_SERVO_OFFSET);
-  frontRightSteerServo.write(steerRight + FR_SERVO_OFFSET);
-  rearLeftSteerServo.write(180.0 - steerLeft + RL_SERVO_OFFSET);
-  rearRightSteerServo.write(180.0 - steerRight + RR_SERVO_OFFSET);
+
+  // Convert angles to pwm and output.  Limit each servo to the
+  // range it can reach without binding.  This range was determined
+  // empirically.
+  // Front left steering servo
+  pw = FL_SERVO_CENTER + (uint16_t)(steerLeft * SERVO_US_PER_DEG);
+  if (pw < FL_SERVO_MIN) pw = FL_SERVO_MIN;
+  else if (pw > FL_SERVO_MAX) pw = FL_SERVO_MAX;
+  frontLeftSteerServo.writeMicroseconds(pw);
+  // Rear left steering servo
+  pw = RL_SERVO_CENTER - (uint16_t)(steerLeft * SERVO_US_PER_DEG);
+  if (pw < RL_SERVO_MIN) pw = RL_SERVO_MIN;
+  else if (pw > RL_SERVO_MAX) pw = RL_SERVO_MAX;
+  rearLeftSteerServo.writeMicroseconds(pw);
+  // Front right steering servo
+  pw = FR_SERVO_CENTER + (uint16_t)(steerRight * SERVO_US_PER_DEG);
+  if (pw < FR_SERVO_MIN) pw = FR_SERVO_MIN;
+  else if (pw > FR_SERVO_MAX) pw = FR_SERVO_MAX;
+  frontRightSteerServo.writeMicroseconds(pw);
+  // Rear right steering servo
+  pw = RR_SERVO_CENTER - (uint16_t)(steerRight * SERVO_US_PER_DEG);
+  if (pw < RR_SERVO_MIN) pw = RR_SERVO_MIN;
+  else if (pw > RR_SERVO_MAX) pw = RR_SERVO_MAX;
+  rearRightSteerServo.writeMicroseconds(pw);
 }
 
 //*************************************************************************************
