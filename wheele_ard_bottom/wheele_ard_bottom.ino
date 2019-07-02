@@ -107,8 +107,10 @@ int16_t enc_left = 0, enc_right = 0;
 
 bool autoMode = false;
 
+// For WheelE ESCs, lower pulse widths result in forward motion
 Servo leftESC;
 Servo rightESC;
+// For WheelE servos, on all 4 wheels, lower pulse widths turn the wheels CCW
 Servo frontLeftSteerServo;
 Servo frontRightSteerServo;
 Servo rearLeftSteerServo;
@@ -151,6 +153,18 @@ void setup() {
   timeBump = millis();
   timeEnc = millis();
   timeServoCheck = millis();
+
+#if 0
+while (1)
+{
+  updateServos(0.0, 0.0);
+  delay(2000);
+//  updateServos(0.5, 2.0);
+  delay(2000);
+//  updateServos(0.25, 1.0);
+  delay(2000);
+}
+#endif
 }
 
 //********************************Main Loop*********************************//
@@ -199,10 +213,10 @@ void loop()
     // After timeout with no CAN RC packet, send STOP pulses to the ESCs
     leftESC.writeMicroseconds(1500);
     rightESC.writeMicroseconds(1500);
-    frontLeftSteerServo.writeMicroseconds(1500);
-    frontRightSteerServo.writeMicroseconds(1500);
-    rearLeftSteerServo.writeMicroseconds(1500);
-    rearRightSteerServo.writeMicroseconds(1500);
+    frontLeftSteerServo.writeMicroseconds(FL_SERVO_CENTER);
+    frontRightSteerServo.writeMicroseconds(FR_SERVO_CENTER);
+    rearLeftSteerServo.writeMicroseconds(RL_SERVO_CENTER);
+    rearRightSteerServo.writeMicroseconds(RR_SERVO_CENTER);
     autoMode = false;
     timeServoCheck = millis();
   }
@@ -354,29 +368,12 @@ void parseRCCmd(unsigned char * data)
       steerPwm = 1500;
     if ((speedPwm > 1475) && (speedPwm < 1525))
     {
-      // If speed is in deadband, then use the steer RC to turn in place.
-      if (steerPwm == 1500)
-        speedPwm = 1500;  // If both speed and steer are in deadband, do nothing.
-      else
-      {
-        // Set steer PWM to max magnitude, and set speed PWM to forward, with speed
-        // proportional to steer
-        if (steerPwm > 1500)
-        {
-          speedPwm = steerPwm;
-          steerPwm = 2000;
-        }
-        else
-        {
-          speedPwm = 3000 - steerPwm;
-          steerPwm = 1000;
-        }
-      }
+      speedPwm = 1500;  // If both speed and steer are in deadband, do nothing.
     }
     // Compute speed and curvature.  Positive curvature is defined as CCW, which corresponds
     // to steerPwm less than 1500.
     velocity = (speedPwm - 1500.0) * MAX_VELOCITY / 500.0;
-    curvature = -(steerPwm - 1500.0) * MAX_CURVATURE / 500;
+    curvature = (steerPwm - 1500.0) * MAX_CURVATURE / 500;
     
     updateServos(velocity, curvature);
   }
@@ -461,7 +458,12 @@ void parseCmdVel(unsigned char * data)
 void updateServos(float velocity, float curvature)
 {
   float cdxL, cdxR, cdy, spdLeft, spdRight, steerLeft, steerRight, spdAbs;
+  uint16_t spdLus, spdRus;
   uint16_t pw;
+
+#if 1
+  Serial.print("updateServos:  v = "); Serial.print(velocity); Serial.print(", c = "); Serial.println(curvature);
+#endif
 
   // Calculate left/right speeds in m/s and wheel angles in radians
   cdy = curvature * WHEELBASE_LENGTH / 2;
@@ -489,53 +491,57 @@ void updateServos(float velocity, float curvature)
     spdLeft /= spdAbs;
     spdRight /= spdAbs;
   }
+#if 1
+  Serial.print("spdL = "); Serial.print(spdLeft); Serial.print(", spdR = "); Serial.println(spdRight);
+  Serial.print("steerL = "); Serial.print(steerLeft); Serial.print(", steerR = "); Serial.println(steerRight);
+#endif
 
   // Convert speeds to pwm
-  spdRight = spdRight * 500 / MAX_VELOCITY + 1500;
-  spdLeft = spdLeft * 500 / MAX_VELOCITY + 1500;
-  
-#if 0
-  Serial.print("Left ESC us = ");
-  Serial.print(spdLeft);
-  Serial.print(", Right = ");
-  Serial.println(spdRight);
-  Serial.print("FL Steer us = ");
-  Serial.print(steerLeft);
-  Serial.print(", RL = ");
-  Serial.print(180.0 - steerLeft);
-  Serial.print(", FR = ");
-  Serial.print(steerRight);
-  Serial.print(", RR = ");
-  Serial.println(180.0 - steerRight);
-#endif
+  spdRus = 1500 - spdRight * 500 / MAX_VELOCITY;
+  spdLus = 1500 - spdLeft * 500 / MAX_VELOCITY;
   
   // Convert speeds to pwm and output
-  leftESC.writeMicroseconds(3000 - spdRight);
-  rightESC.writeMicroseconds(3000 - spdLeft);
+  leftESC.writeMicroseconds(spdLus);
+  rightESC.writeMicroseconds(spdRus);
+  
+#if 1
+  Serial.print("Left ESC us = ");
+  Serial.print(spdLus);
+  Serial.print(", Right = ");
+  Serial.println(spdRus);
+#endif
 
   // Convert angles to pwm and output.  Limit each servo to the
   // range it can reach without binding.  This range was determined
   // empirically.
   // Front left steering servo
-  pw = FL_SERVO_CENTER + (uint16_t)(steerLeft * SERVO_US_PER_DEG);
+  pw = FL_SERVO_CENTER - (uint16_t)(steerLeft * SERVO_US_PER_DEG);
   if (pw < FL_SERVO_MIN) pw = FL_SERVO_MIN;
   else if (pw > FL_SERVO_MAX) pw = FL_SERVO_MAX;
   frontLeftSteerServo.writeMicroseconds(pw);
+Serial.print("FL = ");
+Serial.print(pw);
   // Rear left steering servo
-  pw = RL_SERVO_CENTER - (uint16_t)(steerLeft * SERVO_US_PER_DEG);
+  pw = RL_SERVO_CENTER + (uint16_t)(steerLeft * SERVO_US_PER_DEG);
   if (pw < RL_SERVO_MIN) pw = RL_SERVO_MIN;
   else if (pw > RL_SERVO_MAX) pw = RL_SERVO_MAX;
   rearLeftSteerServo.writeMicroseconds(pw);
+Serial.print(", RL = ");
+Serial.print(pw);
   // Front right steering servo
-  pw = FR_SERVO_CENTER + (uint16_t)(steerRight * SERVO_US_PER_DEG);
+  pw = FR_SERVO_CENTER - (uint16_t)(steerRight * SERVO_US_PER_DEG);
   if (pw < FR_SERVO_MIN) pw = FR_SERVO_MIN;
   else if (pw > FR_SERVO_MAX) pw = FR_SERVO_MAX;
   frontRightSteerServo.writeMicroseconds(pw);
+Serial.print(", FR = ");
+Serial.print(pw);
   // Rear right steering servo
-  pw = RR_SERVO_CENTER - (uint16_t)(steerRight * SERVO_US_PER_DEG);
+  pw = RR_SERVO_CENTER + (uint16_t)(steerRight * SERVO_US_PER_DEG);
   if (pw < RR_SERVO_MIN) pw = RR_SERVO_MIN;
   else if (pw > RR_SERVO_MAX) pw = RR_SERVO_MAX;
   rearRightSteerServo.writeMicroseconds(pw);
+Serial.print(", RR = ");
+Serial.println(pw);
 }
 
 //*************************************************************************************
