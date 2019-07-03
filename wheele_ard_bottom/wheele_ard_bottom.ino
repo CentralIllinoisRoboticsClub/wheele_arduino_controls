@@ -451,7 +451,7 @@ void parseCmdVel(unsigned char * data)
 #endif
   
   // Send commands to ESCs and servos to move according to the calculated velocity and curvature.
-  updateServos(velocity, -curvature);
+  updateServos(velocity, curvature);
 }
 
 //*************************************************************************************
