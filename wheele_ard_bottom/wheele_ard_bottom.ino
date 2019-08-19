@@ -8,21 +8,9 @@ Distributed as-is; no warranty is given.
 
 /****************************************************************************
 ** Planned updates:
-** 1. Add EEPROM storage of tuning parameters
-**    - Servo offsets
-**    - Odometer counts per meter
-**    - Max velocity
-**    - Max curvature
-**    - Robot wheelebase length & width
-**    - Battery voltage & current scale & offset
-**    - Speed control KP, KI, & KD
-**    - Speed control feed-forward term if needed
-** 2. Add CAN messages to update EEPROM tuning parameters
-**    - Message to set given parameter in RAM
-**    - Message to read parameter from EEPROM or RAM
-**    - Message to store parameters from RAM to EEPROM
-** 3. Add closed loop speed control based on odometer reading
-** 4. For steering servos, use writeMicroseconds() instead of write()
+** 1. Add closed loop speed control based on odometer reading
+** 2. For steering servos, use writeMicroseconds() instead of write()
+** 3. Remove TURN_IN_PLACE_VELOCITY and replace with calculated value
 *************************************************************************/
 
 #include <mcp_can.h>
@@ -38,9 +26,12 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 // Define maximum curvature in 1/m.  A curvature of 2.0 corresponds to turning radius of 0.5 meter.
 #define MAX_CURVATURE 2.0
 // Define the velocity for turning in place, in m/s
-#define TURN_IN_PLACE_VELOCITY 1.0
+//#define TURN_IN_PLACE_VELOCITY 1.0
 // Define maximum velocity in m/s
 #define MAX_VELOCITY 2.0
+
+// Scaling for encoder ticks
+#define ENC_METERS_PER_TICK 900
 
 //***************CAN IDs**************
 #define RC_CMD_CAN_ID 0x101
@@ -98,10 +89,16 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 #define ENC_PERIOD 50 //msec
 #define BUMP_PERIOD 100 //msec
 
+//*************Velocity tuning gains*********
+#define KF 250.0    // Feedforward:  1m/s results in 50% power to motors
+#define KP 250.0    // Proportional:  1m/s error results in 50% power to motors
+#define KI 10.0     // Integral: 1m/s error results in 0 to 100% ramp of 5 seconds with 100ms control loop
+
 //********************************Global Variables*********************************//
 
 uint16_t timeBump, timeEnc, timeServoCheck, timeBatt;
 long prev_enc_left, prev_enc_right;
+float measuredVelocityLeft, measuredVelocityRight;
 
 int16_t enc_left = 0, enc_right = 0;
 
@@ -254,6 +251,8 @@ void loop()
   //SEND Encoders
   if(timeSince(timeEnc) > ENC_PERIOD)
   {
+    measuredVelocityLeft = enc_left * (ENC_METERS_PER_TICK / ENC_PERIOD);
+    measuredVelocityRight = enc_right * (ENC_METERS_PER_TICK / ENC_PERIOD);
     tx_can(ENC_CAN_ID, enc_left, enc_right, 0, 0);
     //Serial.println(enc_left);
     timeEnc = millis();
@@ -419,17 +418,22 @@ void parseCmdVel(unsigned char * data)
       // If velocity is zero but yaw is non-zero, this indicates an attempt
       // to turn in place, which Wheel-E cannot do.  Turn in the direction
       // indicated as sharply as possible.
-      // NOTE:  consider computing the velocity needed to get the commanded
-      //   yaw rate with the given curvature
-      velocity = TURN_IN_PLACE_VELOCITY;
       if (yawRate > 0.0)
         curvature = MAX_CURVATURE;
       else
         curvature = -MAX_CURVATURE;
+      // Compute velocity needed to achieve desired yaw rate
+      velocity = yawRate / curvature;
+      // Limit velocity to the maximum
+      if (velocity > MAX_VELOCITY)
+        velocity = MAX_VELOCITY;
+      else if (velocity < -MAX_VELOCITY)
+        velocity = -MAX_VELOCITY;
     }
   }
   else
   {
+    // Velocity is non-zero, so calculate curvature.
     // Limit velocity to the maximum
     if (velocity > MAX_VELOCITY)
       velocity = MAX_VELOCITY;
@@ -455,60 +459,68 @@ void parseCmdVel(unsigned char * data)
 }
 
 //*************************************************************************************
-void updateServos(float velocity, float curvature)
+void updateServos(float cmdVelocity, float cmdCurvature)
 {
-  float cdxL, cdxR, cdy, spdLeft, spdRight, steerLeft, steerRight, spdAbs;
-  uint16_t spdLus, spdRus;
+  float cdxL, cdxR, cdy;  // Delta x & y for curvature calculations
+  float spdLeft, spdRight;
+  float errorLeft, errorRight;
+  float steerLeft, steerRight;
   uint16_t pw;
+  static int16_t escLus, escRus;
+  static float prevSpdLeft, prevSpdRight, prevErrorLeft, prevErrorRight;
 
 #if 1
-  Serial.print("updateServos:  v = "); Serial.print(velocity); Serial.print(", c = "); Serial.println(curvature);
+  Serial.print("updateServos:  v = "); Serial.print(cmdVelocity); Serial.print(", c = "); Serial.println(cmdCurvature);
 #endif
 
   // Calculate left/right speeds in m/s and wheel angles in radians
-  cdy = curvature * WHEELBASE_LENGTH / 2;
-  cdxL = 1.0 - curvature * WHEELBASE_WIDTH / 2;
+  cdy = cmdCurvature * WHEELBASE_LENGTH / 2;
+  cdxL = 1.0 - cmdCurvature * WHEELBASE_WIDTH / 2;
   
-  spdLeft = sqrt(cdxL * cdxL + cdy * cdy) * velocity;
+  spdLeft = sqrt(cdxL * cdxL + cdy * cdy) * cmdVelocity;
   steerLeft = atan(cdy / cdxL) * 180.0 / 3.1416;
 
-  cdxR = 1.0 + curvature * WHEELBASE_WIDTH / 2;
-  spdRight = sqrt(cdxR * cdxR + cdy * cdy) * velocity;
+  cdxR = 1.0 + cmdCurvature * WHEELBASE_WIDTH / 2;
+  spdRight = sqrt(cdxR * cdxR + cdy * cdy) * cmdVelocity;
   steerRight = atan(cdy / cdxR) * 180.0 / 3.1416;
   
-  // Adjust speed left/right if needed to keep in range +/- MAX_VELOCITY.
-  // If the velocity passed by the caller is in the valid range, then only one of the
-  // left/right might end up outside the range, but check both just in case.
-  spdAbs = fabs(spdLeft);
-  if (spdAbs > MAX_VELOCITY)
-  {
-    spdLeft /= spdAbs;
-    spdRight /= spdAbs;
-  }
-  spdAbs = fabs(spdRight);
-  if (spdAbs > MAX_VELOCITY)
-  {
-    spdLeft /= spdAbs;
-    spdRight /= spdAbs;
-  }
+  // Speed left/right are in meters/second.  Convert to pulse widths in us based on tuning
+  // parameters.  Use a PI control with feed-forward, in the derivative form.
+  //   Standard form:  escLus = KF * spdLeft + KP * error + KI * errInt
+  //   Derivative form:  escLus += KF * (spdLeft - prevSpdLeft) + KP * (error - prevError) + KI * error
+  // The advantage of the derivative form is that it simplifies handling of integral runaway.
+  errorLeft = spdLeft - measuredVelocityLeft;
+  escLus += (int16_t)(KF * (spdLeft - prevSpdLeft)) + KP * (errorLeft - prevErrorLeft) + KI * errorLeft;
+  prevSpdLeft = spdLeft;
+  prevErrorLeft = errorLeft;
+  errorRight = spdRight - measuredVelocityRight;
+  escRus += (int16_t)(KF * (spdRight - prevSpdRight)) + KP * (errorRight - prevErrorRight) + KI * errorRight;
+  prevSpdRight = spdRight;
+  prevErrorRight = errorRight;
+  
+  // The speeds are now in signed microseconds centered around 0us, where positive is forward.
+  // Limit to the range +/-500us.
+  // NOTE:  This is the step that handles integral runaway.  The clipped speeds will be used as the
+  // starting point for the next PI calculation, so the integral can never run away.
+  if (escLus > 500) escLus = 500;
+  else if (escLus < -500) escLus = -500;
+  if (escRus > 500) escRus = 500;
+  else if (escRus < -500) escRus = -500;
+  
 #if 1
   Serial.print("spdL = "); Serial.print(spdLeft); Serial.print(", spdR = "); Serial.println(spdRight);
   Serial.print("steerL = "); Serial.print(steerLeft); Serial.print(", steerR = "); Serial.println(steerRight);
 #endif
 
-  // Convert speeds to pwm
-  spdRus = 1500 - spdRight * 500 / MAX_VELOCITY;
-  spdLus = 1500 - spdLeft * 500 / MAX_VELOCITY;
-  
-  // Convert speeds to pwm and output
-  leftESC.writeMicroseconds(spdLus);
-  rightESC.writeMicroseconds(spdRus);
+  // Convert speeds to the range 1000 to 2000us and output.  
+  leftESC.writeMicroseconds(1500 - escLus);
+  rightESC.writeMicroseconds(1500 - escRus);
   
 #if 1
   Serial.print("Left ESC us = ");
-  Serial.print(spdLus);
+  Serial.print(escLus);
   Serial.print(", Right = ");
-  Serial.println(spdRus);
+  Serial.println(escRus);
 #endif
 
   // Convert angles to pwm and output.  Limit each servo to the
