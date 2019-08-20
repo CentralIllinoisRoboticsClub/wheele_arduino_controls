@@ -31,7 +31,7 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 #define MAX_VELOCITY 2.0
 
 // Scaling for encoder ticks
-#define ENC_METERS_PER_TICK 900
+#define ENC_METERS_PER_TICK (1.0 / 900.0)
 
 //***************CAN IDs**************
 #define RC_CMD_CAN_ID 0x101
@@ -91,16 +91,16 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 
 //*************Velocity tuning gains*********
 #define KF 250.0    // Feedforward:  1m/s results in 50% power to motors
-#define KP 250.0    // Proportional:  1m/s error results in 50% power to motors
-#define KI 10.0     // Integral: 1m/s error results in 0 to 100% ramp of 5 seconds with 100ms control loop
+#define KP 0.0    // Proportional:  No proportional gain
+#define KI 50.0     // Integral: 1m/s error results in 0 to 100% ramp of 1 second with 100ms control loop
 
 //********************************Global Variables*********************************//
 
-uint16_t timeBump, timeEnc, timeServoCheck, timeBatt;
-long prev_enc_left, prev_enc_right;
+uint16_t timeBump, timeEnc, timeServoCheck, timeBatt, timeServoUpdate;
 float measuredVelocityLeft, measuredVelocityRight;
 
-int16_t enc_left = 0, enc_right = 0;
+int16_t encLeft = 0, encRight = 0;
+int16_t prevEncLeft = 0, prevEncRight = 0;
 
 bool autoMode = false;
 
@@ -150,6 +150,7 @@ void setup() {
   timeBump = millis();
   timeEnc = millis();
   timeServoCheck = millis();
+  timeServoUpdate = millis();
 
 #if 0
 while (1)
@@ -251,10 +252,7 @@ void loop()
   //SEND Encoders
   if(timeSince(timeEnc) > ENC_PERIOD)
   {
-    measuredVelocityLeft = enc_left * (ENC_METERS_PER_TICK / ENC_PERIOD);
-    measuredVelocityRight = enc_right * (ENC_METERS_PER_TICK / ENC_PERIOD);
-    tx_can(ENC_CAN_ID, enc_left, enc_right, 0, 0);
-    //Serial.println(enc_left);
+    tx_can(ENC_CAN_ID, encLeft, encRight, 0, 0);
     timeEnc = millis();
   }
   
@@ -275,8 +273,8 @@ void loop()
       Serial.print(", ");
       Serial.println(convertCAN(msg,2));
       Serial.println("enc left, enc right:");
-      Serial.print(enc_left); Serial.print(", ");
-      Serial.println(enc_right);
+      Serial.print(encLeft); Serial.print(", ");
+      Serial.println(encRight);
     }
   }*/
 
@@ -469,7 +467,7 @@ void updateServos(float cmdVelocity, float cmdCurvature)
   static int16_t escLus, escRus;
   static float prevSpdLeft, prevSpdRight, prevErrorLeft, prevErrorRight;
 
-#if 1
+#if 0
   Serial.print("updateServos:  v = "); Serial.print(cmdVelocity); Serial.print(", c = "); Serial.println(cmdCurvature);
 #endif
 
@@ -489,6 +487,12 @@ void updateServos(float cmdVelocity, float cmdCurvature)
   //   Standard form:  escLus = KF * spdLeft + KP * error + KI * errInt
   //   Derivative form:  escLus += KF * (spdLeft - prevSpdLeft) + KP * (error - prevError) + KI * error
   // The advantage of the derivative form is that it simplifies handling of integral runaway.
+  float vScale = 1000.0 * ENC_METERS_PER_TICK / timeSince(timeServoUpdate);
+  timeServoUpdate = millis();
+  measuredVelocityLeft = (int16_t)(encLeft - prevEncLeft) * vScale;
+  measuredVelocityRight = (int16_t)(encRight - prevEncRight) * vScale;
+  prevEncLeft = encLeft;
+  prevEncRight = encRight;
   errorLeft = spdLeft - measuredVelocityLeft;
   escLus += (int16_t)(KF * (spdLeft - prevSpdLeft)) + KP * (errorLeft - prevErrorLeft) + KI * errorLeft;
   prevSpdLeft = spdLeft;
@@ -497,6 +501,12 @@ void updateServos(float cmdVelocity, float cmdCurvature)
   escRus += (int16_t)(KF * (spdRight - prevSpdRight)) + KP * (errorRight - prevErrorRight) + KI * errorRight;
   prevSpdRight = spdRight;
   prevErrorRight = errorRight;
+Serial.print(errorLeft);
+Serial.print(", ");
+Serial.println(errorRight);
+//Serial.print("errL = "); Serial.print(errorLeft);
+//Serial.print(", errR = "); Serial.println(errorRight);
+//Serial.print("R us = "); Serial.println(escRus);
   
   // The speeds are now in signed microseconds centered around 0us, where positive is forward.
   // Limit to the range +/-500us.
@@ -507,7 +517,7 @@ void updateServos(float cmdVelocity, float cmdCurvature)
   if (escRus > 500) escRus = 500;
   else if (escRus < -500) escRus = -500;
   
-#if 1
+#if 0
   Serial.print("spdL = "); Serial.print(spdLeft); Serial.print(", spdR = "); Serial.println(spdRight);
   Serial.print("steerL = "); Serial.print(steerLeft); Serial.print(", steerR = "); Serial.println(steerRight);
 #endif
@@ -516,7 +526,7 @@ void updateServos(float cmdVelocity, float cmdCurvature)
   leftESC.writeMicroseconds(1500 - escLus);
   rightESC.writeMicroseconds(1500 - escRus);
   
-#if 1
+#if 0
   Serial.print("Left ESC us = ");
   Serial.print(escLus);
   Serial.print(", Right = ");
@@ -531,29 +541,29 @@ void updateServos(float cmdVelocity, float cmdCurvature)
   if (pw < FL_SERVO_MIN) pw = FL_SERVO_MIN;
   else if (pw > FL_SERVO_MAX) pw = FL_SERVO_MAX;
   frontLeftSteerServo.writeMicroseconds(pw);
-Serial.print("FL = ");
-Serial.print(pw);
+//Serial.print("FL = ");
+//Serial.print(pw);
   // Rear left steering servo
   pw = RL_SERVO_CENTER + (uint16_t)(steerLeft * SERVO_US_PER_DEG);
   if (pw < RL_SERVO_MIN) pw = RL_SERVO_MIN;
   else if (pw > RL_SERVO_MAX) pw = RL_SERVO_MAX;
   rearLeftSteerServo.writeMicroseconds(pw);
-Serial.print(", RL = ");
-Serial.print(pw);
+//Serial.print(", RL = ");
+//Serial.print(pw);
   // Front right steering servo
   pw = FR_SERVO_CENTER - (uint16_t)(steerRight * SERVO_US_PER_DEG);
   if (pw < FR_SERVO_MIN) pw = FR_SERVO_MIN;
   else if (pw > FR_SERVO_MAX) pw = FR_SERVO_MAX;
   frontRightSteerServo.writeMicroseconds(pw);
-Serial.print(", FR = ");
-Serial.print(pw);
+//Serial.print(", FR = ");
+//Serial.print(pw);
   // Rear right steering servo
   pw = RR_SERVO_CENTER + (uint16_t)(steerRight * SERVO_US_PER_DEG);
   if (pw < RR_SERVO_MIN) pw = RR_SERVO_MIN;
   else if (pw > RR_SERVO_MAX) pw = RR_SERVO_MAX;
   rearRightSteerServo.writeMicroseconds(pw);
-Serial.print(", RR = ");
-Serial.println(pw);
+//Serial.print(", RR = ");
+//Serial.println(pw);
 }
 
 //*************************************************************************************
@@ -562,11 +572,11 @@ void left_enc_tick()
   // modify using PORT operations for efficiency
   if(digitalRead(LEFT_ENC_A) != digitalRead(LEFT_ENC_B))
   {
-    enc_left--;
+    encLeft--;
   }
   else
   {
-    enc_left++;
+    encLeft++;
   }
 }
 
@@ -576,11 +586,11 @@ void right_enc_tick()
   // modify using PORT operations for efficiency
   if(digitalRead(RIGHT_ENC_A) != digitalRead(RIGHT_ENC_B))
   {
-    enc_right--;
+    encRight--;
   }
   else
   {
-    enc_right++;
+    encRight++;
   }
 }
 
