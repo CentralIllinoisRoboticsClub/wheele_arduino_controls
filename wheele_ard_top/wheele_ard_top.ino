@@ -42,9 +42,9 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 #define RC_AUTO 3
 #define SYNC_PULSE_THRESH 3000
 
-#define RC_AUTO_PIN  0
-#define RC_SPEED_PIN 1
-#define RC_STEER_PIN 2
+#define RC_AUTO_PIN  4
+#define RC_SPEED_PIN 5
+#define RC_STEER_PIN 6
 
 #define GYRO_PERIOD 50
 #define HEADING_PERIOD 100
@@ -146,12 +146,13 @@ void rc_read_values() {
   left_v_pwm = rc_shared[RC_LEFT_V];
   // Clear the pulses in the array after copying them.  This is used
   // to detect if the pulse train is not being received.
-  rc_shared[RC_STEER] = rc_shared[RC_SPEED] = rc_shared[RC_AUTO] = rc_shared[RC_LEFT_V] = 0;
+  rc_shared[RC_STEER] = rc_shared[RC_SPEED] = rc_shared[RC_AUTO] = rc_shared[RC_LEFT_V] = 1500;
   interrupts();
 }
 
 //*****************************************************************
-// Handle the pin change interrupts for the PWM channels
+// Handle the pin change interrupts for the PWM channels (when
+// using separate PWM inputs instead of CPPM).
 //*****************************************************************
 void pinchange_rc_auto(void)
 {
