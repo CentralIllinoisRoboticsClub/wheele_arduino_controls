@@ -9,6 +9,7 @@ Distributed as-is; no warranty is given.
 #include <mcp_can.h>
 #include <SPI.h>
 #include <Servo.h>
+#include "git-version.h"
 
 const int SPI_CS_PIN = 10;
 MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
@@ -89,6 +90,7 @@ Servo rearRightSteerServo;
 
 void setup() {
   Serial.begin(115200);
+  Serial.println("wheele_ard_bottom version: " GIT_VERSION);
   //Serial.println("CAN Write - Testing transmission of CAN Bus messages");
   delay(200);
 

@@ -1,0 +1,1 @@
+recipe.hooks.sketch.prebuild.1.pattern=make-git-version "{build.source.path}" "{build.path}"

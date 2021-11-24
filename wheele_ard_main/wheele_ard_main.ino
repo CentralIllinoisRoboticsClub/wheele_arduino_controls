@@ -18,6 +18,7 @@ Distributed as-is; no warranty is given.
 #include <global.h>
 #include <mcp2515.h>
 #include <mcp2515_defs.h>
+#include "git-version.h"
 
 //***************CAN IDs**************
 #define RC_CMD_CAN_ID 0x101
@@ -59,6 +60,7 @@ Adafruit_BNO055 bno = Adafruit_BNO055();
 
 void setup() {
   Serial.begin(9600);
+  Serial.println("wheele_ard_main version: " GIT_VERSION);
   Serial.println("CAN Write - Testing transmission of CAN Bus messages");
   delay(200);
   
