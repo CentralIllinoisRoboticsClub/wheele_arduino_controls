@@ -42,6 +42,10 @@ MCP_CAN CAN(SPI_CS_PIN); // Set CS pin
 #define RC_AUTO 3
 #define SYNC_PULSE_THRESH 3000
 
+#define RC_AUTO_PIN  4
+#define RC_SPEED_PIN 5
+#define RC_STEER_PIN 6
+
 #define GYRO_PERIOD 50
 #define HEADING_PERIOD 100
 #define RC_PERIOD 100
@@ -116,7 +120,7 @@ ISR (TIMER1_CAPT_vect)
 void cppmSetup(void)
 {
 
-  pinMode(RC_CPPM_PIN, INPUT);
+  pinMode(RC_CPPM_PIN, INPUT_PULLUP);
   
   noInterrupts();
 
@@ -132,7 +136,7 @@ void cppmSetup(void)
 }
 
 //*****************************************************************
-// Copy the RC pulse widths to an 
+// Copy the RC pulse widths to an array.
 //*****************************************************************
 void rc_read_values() {
   noInterrupts();
@@ -142,8 +146,49 @@ void rc_read_values() {
   left_v_pwm = rc_shared[RC_LEFT_V];
   // Clear the pulses in the array after copying them.  This is used
   // to detect if the pulse train is not being received.
-  rc_shared[RC_STEER] = rc_shared[RC_SPEED] = rc_shared[RC_AUTO] = rc_shared[RC_LEFT_V] = 0;
+  rc_shared[RC_STEER] = rc_shared[RC_SPEED] = rc_shared[RC_AUTO] = rc_shared[RC_LEFT_V] = 1500;
   interrupts();
+}
+
+//*****************************************************************
+// Handle the pin change interrupts for the PWM channels (when
+// using separate PWM inputs instead of CPPM).
+//*****************************************************************
+void pinchange_rc_auto(void)
+{
+  static uint16_t prevMicros;
+  if (digitalRead(RC_AUTO_PIN) == HIGH)
+  {
+    prevMicros = micros();
+  }
+  else
+  {
+    rc_shared[RC_AUTO] = (uint16_t)(micros() - prevMicros);
+  }
+}
+void pinchange_rc_speed(void)
+{
+  static uint16_t prevMicros;
+  if (digitalRead(RC_SPEED_PIN) == HIGH)
+  {
+    prevMicros = micros();
+  }
+  else
+  {
+    rc_shared[RC_SPEED] = (uint16_t)(micros() - prevMicros);
+  }
+}
+void pinchange_rc_steer(void)
+{
+  static uint16_t prevMicros;
+  if (digitalRead(RC_STEER_PIN) == HIGH)
+  {
+    prevMicros = micros();
+  }
+  else
+  {
+    rc_shared[RC_STEER] = (uint16_t)(micros() - prevMicros);
+  }
 }
 
 //********************************Setup Loop*********************************//
@@ -178,6 +223,14 @@ void setup() {
 
   // Set up the CPPM input pin and interrupt.
   cppmSetup();
+
+  // Set up the separate PWM inputs (alternate to CPPM).
+  pinMode(RC_AUTO_PIN, INPUT_PULLUP);
+  pinMode(RC_SPEED_PIN, INPUT_PULLUP);
+  pinMode(RC_STEER_PIN, INPUT_PULLUP);
+  enableInterrupt(RC_AUTO_PIN, pinchange_rc_auto, CHANGE);
+  enableInterrupt(RC_SPEED_PIN, pinchange_rc_speed, CHANGE);
+  enableInterrupt(RC_STEER_PIN, pinchange_rc_steer, CHANGE);
 
   timeRC = millis();
   timeGyro = millis();
