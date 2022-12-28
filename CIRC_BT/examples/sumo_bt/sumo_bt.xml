@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<root main_tree_to_execute="BehaviorTree">
+    <!-- ////////// -->
+    <BehaviorTree ID="BehaviorTree">
+        <SequenceStar>
+            <Condition ID="StartDelayFinished"/>
+            <Fallback>
+                <Condition ID="OpponentNear"/>
+                <Action ID="ClockwiseSpiral"/>
+            </Fallback>
+            <Action ID="FaceOpponent"/>
+            <Action ID="DriveForward"/>
+        </SequenceStar>
+    </BehaviorTree>
+    <!-- ////////// -->
+    <BehaviorTree ID="FindOpponent">
+        <Fallback>
+            <Action ID="CheckProximity"/>
+            <Action ID="CheckProximity"/>
+            <Action ID="SearchPattern"/>
+        </Fallback>
+    </BehaviorTree>
+    <!-- ////////// -->
+    <TreeNodesModel>
+        <Condition ID="CheckBattery"/>
+        <Action ID="CheckProximity"/>
+        <Action ID="ClockwiseSpiral"/>
+        <Action ID="DriveForward"/>
+        <Action ID="FaceOpponent"/>
+        <SubTree ID="FindOpponent"/>
+        <Condition ID="OpponentNear"/>
+        <Action ID="SearchPattern"/>
+        <Condition ID="StartDelayFinished"/>
+    </TreeNodesModel>
+    <!-- ////////// -->
+</root>
+
