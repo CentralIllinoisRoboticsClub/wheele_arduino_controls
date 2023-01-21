@@ -9,6 +9,11 @@ class BTNode:
         self._child_list_id = child_list_id
         self._child_list = child_list
 
+        if node_type == "BT_NODE_TYPE_LEAF" or node_type == "BT_NODE_TYPE_DECORATOR":
+            self._standard = False
+        else:
+            self._standard = True        
+
     @property
     def id(self):
         return self._id
@@ -29,15 +34,20 @@ class BTNode:
     def child_list(self):
         return self._child_list
 
+    @property
+    def standard(self):
+        return self._standard
+
 class BTDataGenerator:
     def __init__(self,infile,outfile):
         xml = ET.parse(infile)
         xml_root = xml.getroot()
-        self.bt_root = xml_root.find('BehaviorTree')
         self.subtree = dict()
         trees = xml_root.findall('BehaviorTree')
         for tree in trees:
             self.subtree[tree.get("ID")] = tree
+            if(tree.get("ID") == "BehaviorTree"):
+                self.bt_root = tree
 
         self.node_index = 0
         self.outfile = outfile
@@ -79,12 +89,8 @@ class BTDataGenerator:
             node_type = 'BT_NODE_TYPE_LEAF'
             tick = node_id + '_tick'
         elif node.tag == 'SubTree':
-            node_id = node.get('ID')
-            node_type = 'BT_NODE_TYPE_SUBTREE'
-            tick = 'Subtree_tick'
-            subtree_root = self.subtree[node_id]
-            child_id = self.generate_node(subtree_root[0])
-            child_list.append('&' + child_id +',\n')
+            subtree_root = self.subtree[node.get('ID')]
+            return self.generate_node(subtree_root[0])            
         else:
             node_id = node.tag
             node_type = 'BT_NODE_TYPE_LEAF'
@@ -124,7 +130,8 @@ class BTDataGenerator:
         self.f.write('\n')
 
         for node in self.nodes:
-            self.f.write('extern bt_status_t ' + node.tick + '(struct bt_node const * const this);\n')
+            if node.standard is not True: 
+                self.f.write('extern bt_status_t ' + node.tick + '(struct bt_node const * const this);\n')
         self.f.write('\n')
 
         for node in self.nodes:
